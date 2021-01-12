@@ -136,28 +136,6 @@ mod tests {
     use crate::tokio_utils::create_tokio_runtime;
     use crate::test_utils::{DummyDispatcher, DummyPlugin, DummyResult, build_dummy_runtime, DummySource};
 
-    /*#[derive(Clone)]
-    struct DummyResult {}
-
-    struct DummyPlugin {}
-
-    impl PluginCallResult for DummyResult {
-        type Ok = ();
-        type Err = ();
-    }
-
-    struct DummyDispatcher {
-        receiver: Option<Receiver<Result<(), ()>>>
-    }
-
-    impl Dispatcher for DummyDispatcher {
-        type Result = DummyResult;
-
-        fn register(&mut self) -> Result<PluginOpCallBack<Result<(), ()>>, String> {
-            Ok(PluginOpCallBack::new(0, self.receiver.take().unwrap()))
-        }
-    }*/
-
     #[test]
     fn execute() {
         let (sender, receiver) = channel();
