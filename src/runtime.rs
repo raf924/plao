@@ -1,12 +1,15 @@
-use crate::{Plugin, PluginCallResult, PluginData, PluginResult};
+use crate::{Plugin, PluginCallResult, PluginData, PluginResult, PluginError};
 use std::collections::HashMap;
-use std::sync::mpsc::{channel, Receiver, RecvError, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use typed_builder::TypedBuilder;
+use uuid::Uuid;
+use std::result::Result::Err;
 
-pub type PluginOpCallId = i64;
+pub type PluginOpCallId = Uuid;
 
-pub struct PluginOpCall<T> {
+pub struct PluginOpCall<P: PluginData, T> {
+    pub plugin_data: P,
     pub call_id: PluginOpCallId,
     pub call: T,
 }
@@ -16,65 +19,35 @@ pub struct PluginOpCallResult<Success, Failure> {
     result: Result<Success, Failure>,
 }
 
-pub struct PluginOpCallBack<T> {
-    op_id: PluginOpCallId,
-    receiver: Receiver<T>,
-}
-
-impl<T> PluginOpCallBack<T> {
-    pub fn new(op_id: PluginOpCallId, receiver: Receiver<T>) -> Self {
-        PluginOpCallBack { op_id, receiver }
-    }
-    pub fn op_id(&self) -> PluginOpCallId {
-        self.op_id
-    }
-
-    pub fn recv(&self) -> Result<T, RecvError> {
-        self.receiver.recv()
-    }
-}
-
-pub trait Dispatcher {
-    type Result: PluginCallResult;
-    fn register(
-        &mut self,
-    ) -> Result<
-        PluginOpCallBack<
-            Result<<Self::Result as PluginCallResult>::Ok, <Self::Result as PluginCallResult>::Err>,
-        >,
-        String,
-    >;
-}
-
 #[derive(TypedBuilder)]
-pub struct PluginRuntime<C, R: PluginCallResult> {
+pub struct PluginRuntime<C: Send, R: PluginCallResult, P: PluginData<PluginCall=C, PluginCallResult=R>> {
     #[builder(setter(strip_option))]
-    event_loop: Option<Box<dyn Send + Fn(Handle<C, R>) -> ()>>,
+    event_loop: Option<Box<dyn Send + Fn(Handle<P>) -> ()>>,
+    plugin_loader: Box<dyn Fn(P) -> C>,
 
-    plugin_loader: Box<dyn Fn(Box<dyn PluginData<PluginCall = C, PluginCallResult = R>>) -> C>,
-
-    dispatcher: Arc<Mutex<dyn Dispatcher<Result = R>>>,
-
-    #[builder(setter(strip_option))]
+    #[builder(default=None, setter(skip))]
     result_sender: Option<Sender<PluginOpCallResult<R::Ok, R::Err>>>,
     #[builder(default=None, setter(skip))]
-    call_sender: Option<Sender<PluginOpCall<C>>>,
+    call_sender: Option<Sender<PluginOpCall<P, C>>>,
+    #[builder(default=None, setter(skip))]
+    subscribers: Option<Arc<Mutex<HashMap<PluginOpCallId, Sender<Result<R::Ok, R::Err>>>>>>,
 }
 
-impl<C, R: PluginCallResult> Drop for PluginRuntime<C, R> {
+impl<C: Send, R: PluginCallResult, P: PluginData<PluginCall=C, PluginCallResult=R>> Drop for PluginRuntime<C, R, P> {
     fn drop(&mut self) {
         self.call_sender.take();
         self.result_sender.take();
+        self.subscribers.take();
     }
 }
 
-pub struct Handle<C, R: PluginCallResult> {
-    result_sender: Sender<PluginOpCallResult<R::Ok, R::Err>>,
-    call_receiver: Option<Receiver<PluginOpCall<C>>>,
+pub struct Handle<P: PluginData> {
+    result_sender: Sender<PluginOpCallResult<<P::PluginCallResult as PluginCallResult>::Ok, <P::PluginCallResult as PluginCallResult>::Err>>,
+    call_receiver: Option<Receiver<PluginOpCall<P, P::PluginCall>>>,
 }
 
-impl<C, R: PluginCallResult> Handle<C, R> {
-    pub fn resolver<T: Into<R::Ok>>(&self) -> impl Fn(PluginOpCallId, T) {
+impl<P: PluginData> Handle<P> {
+    pub fn resolver<T: Into<<P::PluginCallResult as PluginCallResult>::Ok>>(&self) -> impl Fn(PluginOpCallId, T) {
         let sender = self.result_sender.clone();
         move |id, result| {
             if let Err(e) = sender.send(PluginOpCallResult {
@@ -86,7 +59,7 @@ impl<C, R: PluginCallResult> Handle<C, R> {
         }
     }
 
-    pub fn rejecter<T: Into<R::Err>>(&self) -> impl Fn(PluginOpCallId, T) {
+    pub fn rejecter<T: Into<<P::PluginCallResult as PluginCallResult>::Err>>(&self) -> impl Fn(PluginOpCallId, T) {
         let sender = self.result_sender.clone();
         move |id, result| {
             if let Err(e) = sender.send(PluginOpCallResult {
@@ -98,7 +71,7 @@ impl<C, R: PluginCallResult> Handle<C, R> {
         }
     }
 
-    pub fn call_receiver(&mut self) -> impl Fn() -> Result<PluginOpCall<C>, String> {
+    pub fn call_receiver(&mut self) -> impl Fn() -> Result<PluginOpCall<P, P::PluginCall>, String> {
         let receiver = self.call_receiver.take();
         move || {
             if receiver.is_none() {
@@ -113,144 +86,75 @@ impl<C, R: PluginCallResult> Handle<C, R> {
     }
 }
 
-impl<C: 'static + Send, R: 'static + PluginCallResult> PluginRuntime<C, R> {
-    pub fn run(&mut self) -> impl Send + core::future::Future<Output=()> {
+impl<C: 'static + Send, R: 'static + PluginCallResult, P: PluginData<PluginCall=C, PluginCallResult=R>> PluginRuntime<C, R, P> {
+    pub fn run(&mut self) -> (impl core::future::Future<Output=()>, impl core::future::Future<Output=()>) {
         let (call_sender, call_receiver) = channel();
+        let (result_sender, result_receiver) = channel();
         self.call_sender = Some(call_sender);
         let event_loop = self.event_loop.take().unwrap();
         let handle = Handle {
-            result_sender: self.result_sender.clone().unwrap(),
+            result_sender: result_sender.clone(),
             call_receiver: Some(call_receiver),
         };
-        async move {
-            (event_loop)(handle);
-        }
-    }
-
-    pub fn load_plugin(
-        &mut self,
-        plugin: Box<dyn PluginData<PluginCall = C, PluginCallResult = R>>,
-    ) -> PluginResult<Plugin<C, R>> {
-        let name = plugin.name();
-        let loading_call = (self.plugin_loader)(plugin);
-        let mut pl = Plugin {
-            name,
-            call_sender: self.get_call_sender(),
-            dispatcher: self.dispatcher.clone(),
-        };
-        pl.execute(loading_call).and_then(|_result| Ok(pl))
-    }
-    pub fn get_call_sender(&self) -> Sender<PluginOpCall<C>> {
-        self.call_sender.clone().unwrap()
-    }
-}
-
-pub struct RuntimeDispatcher<R: PluginCallResult> {
-    result_receiver: Option<Receiver<PluginOpCallResult<R::Ok, R::Err>>>,
-    results: Arc<Mutex<HashMap<PluginOpCallId, Result<R::Ok, R::Err>>>>,
-    subscribers: Arc<Mutex<HashMap<PluginOpCallId, Sender<Result<R::Ok, R::Err>>>>>,
-    counter: i64,
-}
-
-impl<R: PluginCallResult> Dispatcher for RuntimeDispatcher<R> {
-    type Result = R;
-
-    fn register(
-        &mut self,
-    ) -> Result<
-        PluginOpCallBack<
-            Result<<Self::Result as PluginCallResult>::Ok, <Self::Result as PluginCallResult>::Err>,
-        >,
-        String,
-    > {
-        if self.counter == i64::MAX {
-            return Err("too many ops".to_string());
-        }
-        if self.counter > 0 {
-            let subscribers = self.subscribers.lock().unwrap();
-            if subscribers.len() == 0 {
-                self.counter = 0;
-            }
-            let mut keys: Vec<&PluginOpCallId> = subscribers.keys().collect();
-            keys.sort_unstable();
-            keys.reverse();
-            self.counter = **keys.first().unwrap();
-        }
-        self.counter += 1;
-        let id = self.counter;
-        let mut subscribers = self.subscribers.lock().unwrap();
-        let mut results = self.results.lock().unwrap();
-        if subscribers.contains_key(&id) {
-            return Err("already registered".to_string());
-        }
-        let (result_sender, result_receiver) = channel();
-        if results.contains_key(&id) {
-            result_sender.send(results.remove(&id).unwrap());
-        } else {
-            subscribers.insert(id, result_sender);
-        }
-        Ok(PluginOpCallBack {
-            op_id: id,
-            receiver: result_receiver,
-        })
-    }
-}
-
-impl<R: 'static + PluginCallResult> RuntimeDispatcher<R> {
-    pub fn run(&mut self) -> impl core::future::Future<Output=()> {
-        let result_receiver = Mutex::new(self.result_receiver.take().unwrap());
-        let results_cloned = self.results.clone();
-        let subscribers_cloned = self.subscribers.clone();
-        async move {
-            while let Ok(receiver) = result_receiver.lock() {
-                let res = receiver.recv();
+        self.result_sender.replace(result_sender);
+        self.subscribers.replace(Arc::new(Mutex::new(HashMap::new())));
+        let subscribers_cloned = self.subscribers.clone().unwrap();
+        (async move {
+            loop {
+                let res = result_receiver.recv();
                 if let Err(e) = res {
                     eprintln!("{}", e.to_string());
                     break;
                 }
                 let res = res.unwrap();
                 let mut subscribers = subscribers_cloned.lock().unwrap();
-                let id = res.call_id;
-                if !subscribers.contains_key(&id) {
-                    results_cloned.lock().unwrap().insert(id, res.result);
-                    continue;
-                }
-                let sender: Sender<Result<R::Ok, R::Err>> = subscribers.remove(&id).unwrap();
+                let sender: Sender<Result<R::Ok, R::Err>> = subscribers.remove(&res.call_id).unwrap();
                 if let Err(e) = sender.send(res.result) {
                     eprintln!("{}", e.to_string());
                     break;
                 }
             }
-        }
+        },
+        async move {
+            (event_loop)(handle);
+        })
     }
-    pub fn new(result_receiver: Receiver<PluginOpCallResult<R::Ok, R::Err>>) -> Self {
-        let results = Arc::new(Mutex::new(HashMap::new()));
-        let subscribers = Arc::new(Mutex::new(HashMap::new()));
-        RuntimeDispatcher {
-            result_receiver: Some(result_receiver),
-            results,
-            subscribers,
-            counter: 0,
+
+    pub fn load_plugin(
+        &mut self,
+        plugin: P,
+    ) -> PluginResult<Plugin<P>> {
+        if self.call_sender.is_none() {
+            return Err(PluginError::FailedToLoad("run runtime first".to_string()))
         }
+        if self.subscribers.is_none() {
+            return Err(PluginError::FailedToLoad("run runtime first".to_string()))
+        }
+        let loading_call = (self.plugin_loader)(plugin.clone());
+        let pl = Plugin {
+            plugin_data: plugin,
+            call_sender: self.call_sender.clone().unwrap(),
+            subscribers: self.subscribers.clone().unwrap()
+        };
+        pl.execute(loading_call).and_then(|_result| Ok(pl))
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::channel;
-    use crate::test_utils::{build_dummy_runtime, DummyDispatcher};
+    use crate::test_utils::{build_dummy_runtime};
+    use crate::tokio_utils::create_tokio_runtime;
 
     #[test]
     fn build_runtime() {
-        let (sender, receiver) = channel();
-        let (result_sender, result_receiver) = channel();
-        let mut runtime = build_dummy_runtime(
-            sender,
-            DummyDispatcher {
-                receiver: Some(result_receiver),
-            },
-        );
-        runtime.run();
+        let mut dummy_runtime = build_dummy_runtime();
+        let (fut1, fut2) = dummy_runtime.run();
+        let runtime = create_tokio_runtime();
+        let handle1 = runtime.spawn(fut1);
+        let handle2 = runtime.spawn(fut2);
+        drop(dummy_runtime);
+        let (_res1, _res2) = runtime.block_on(async move {
+            tokio::join!(handle1, handle2)
+        });
     }
 }
