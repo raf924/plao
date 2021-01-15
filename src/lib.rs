@@ -1,10 +1,10 @@
-mod runtime;
 mod tokio_utils;
 
 #[cfg(test)]
 mod test_utils;
 pub mod source;
 pub mod loader;
+pub mod runtime;
 
 use std::error::Error;
 use core::fmt::Formatter;
