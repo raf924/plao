@@ -35,7 +35,7 @@ impl PluginSource for DummySource {
     }
 }
 
-pub(crate) fn build_dummy_runtime() -> PluginRuntime<(), DummyResult, DummyPlugin> {
+pub(crate) fn build_dummy_runtime() -> PluginRuntime<DummyPlugin> {
     PluginRuntime::builder()
         .plugin_loader(Box::new(|_plugin| ()))
         .event_loop(Box::new(move |mut handle: Handle<DummyPlugin>| {
@@ -44,6 +44,7 @@ pub(crate) fn build_dummy_runtime() -> PluginRuntime<(), DummyResult, DummyPlugi
             while let Ok(r) = receive() {
                 (resolve)(r.call_id, "hello".to_string());
             }
+            Ok(())
         }))
         .build()
 }

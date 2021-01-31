@@ -4,7 +4,7 @@ use crate::runtime::PluginRuntime;
 
 pub struct PluginLoader<Source: PluginSource> {
     source: Source,
-    runtime: Option<PluginRuntime<<Source::PluginType as PluginData>::PluginCall, <Source::PluginType as PluginData>::PluginCallResult, Source::PluginType>>,
+    runtime: Option<PluginRuntime<Source::PluginType>>,
 }
 
 impl<Source: PluginSource> Drop for PluginLoader<Source> {
@@ -15,7 +15,7 @@ impl<Source: PluginSource> Drop for PluginLoader<Source> {
 }
 
 impl<Source: 'static + PluginSource> PluginLoader<Source> {
-    pub fn new(plugin_source: Source, plugin_runtime: PluginRuntime<<Source::PluginType as PluginData>::PluginCall, <Source::PluginType as PluginData>::PluginCallResult, Source::PluginType>) -> Self {
+    pub fn new(plugin_source: Source, plugin_runtime: PluginRuntime<Source::PluginType>) -> Self {
         PluginLoader {
             source: plugin_source,
             runtime: Some(plugin_runtime),

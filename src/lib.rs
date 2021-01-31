@@ -11,7 +11,7 @@ use core::fmt::Formatter;
 use core::result::Result;
 use std::sync::mpsc::{Sender, channel};
 use std::result::Result::Err;
-use crate::runtime::{PluginOpCall, PluginOpCallId};
+use crate::runtime::{PluginOpCall, RuntimeResult, PluginOpCallId};
 use std::sync::{Mutex, Arc};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -24,27 +24,27 @@ pub trait PluginData: Clone {
     fn name(&self) -> String;
 }
 
-pub trait PluginCallResult {
-    type Ok: Send;
-    type Err: Send;
+pub trait PluginCallResult: Clone {
+    type Ok: Send + Clone;
+    type Err: Send + Clone + ToString;
 }
 
 pub struct Plugin<P: PluginData> {
     plugin_data: P,
-    call_sender: Sender<PluginOpCall<P, P::PluginCall>>,
-    subscribers: Arc<Mutex<HashMap<PluginOpCallId, Sender<Result<<P::PluginCallResult as PluginCallResult>::Ok, <P::PluginCallResult as PluginCallResult>::Err>>>>>,
+    call_sender: Sender<PluginOpCall<P>>,
+    subscribers: Arc<Mutex<HashMap<PluginOpCallId, Sender<RuntimeResult<P::PluginCallResult>>>>>,
 }
 
 impl<P: PluginData> Plugin<P> {
-    fn execute(&self, plugin_call: P::PluginCall) -> PluginResult<Result<<P::PluginCallResult as PluginCallResult>::Ok, <P::PluginCallResult as PluginCallResult>::Err>> {
+    pub fn execute(&self, plugin_call: P::PluginCall) -> PluginResult<Result<<P::PluginCallResult as PluginCallResult>::Ok, <P::PluginCallResult as PluginCallResult>::Err>> {
         let id = Uuid::new_v4();
         let (result_sender, result_receiver) = channel();
         {
-            let res = self.subscribers.lock();
-            if let Err(ref e) = res {
+            let subscribers = self.subscribers.lock();
+            if let Err(ref e) = subscribers {
                 return Err(PluginError::RuntimeError(e.to_string()));
             }
-            res.unwrap().insert(id, result_sender);
+            subscribers.unwrap().insert(id, result_sender);
         }
         let res = self.call_sender.send(PluginOpCall {
             plugin_data: self.plugin_data.clone(),
@@ -58,7 +58,7 @@ impl<P: PluginData> Plugin<P> {
         if let Err(ref e) = res {
             return Err(PluginError::RuntimeError(e.to_string()));
         }
-        Ok(res.unwrap())
+        Ok(res.unwrap().into())
     }
 }
 
