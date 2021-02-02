@@ -59,48 +59,39 @@ impl<P: PluginData> Drop for PluginRuntime<P> {
     }
 }
 
+#[derive(Clone)]
 pub struct Handle<P: PluginData> {
     result_sender: Sender<PluginOpCallResult<P::PluginCallResult>>,
-    call_receiver: Option<Receiver<PluginOpCall<P>>>,
+    call_receiver: Arc<Mutex<Receiver<PluginOpCall<P>>>>,
 }
 
 impl<P: PluginData> Handle<P> {
-    pub fn resolver<T: Into<<P::PluginCallResult as PluginCallResult>::Ok>>(&self) -> impl Fn(PluginOpCallId, T) {
-        let sender = self.result_sender.clone();
-        move |id, result| {
-            if let Err(e) = sender.send(PluginOpCallResult {
-                call_id: id,
-                result: Ok(result.into()),
-            }) {
-                eprintln!("{}", e.to_string())
-            }
+    pub fn resolve<T: Into<<P::PluginCallResult as PluginCallResult>::Ok>>(&self, id: PluginOpCallId, result: T) {
+        if let Err(e) = self.result_sender.send(PluginOpCallResult {
+            call_id: id,
+            result: Ok(result.into()),
+        }) {
+            eprintln!("{}", e.to_string())
         }
     }
 
-    pub fn rejecter<T: Into<<P::PluginCallResult as PluginCallResult>::Err>>(&self) -> impl Fn(PluginOpCallId, T) {
-        let sender = self.result_sender.clone();
-        move |id, result| {
-            if let Err(e) = sender.send(PluginOpCallResult {
-                call_id: id,
-                result: Err(result.into()),
-            }) {
-                eprintln!("{}", e.to_string());
-            }
+    pub fn reject<T: Into<<P::PluginCallResult as PluginCallResult>::Err>>(&self, id: PluginOpCallId, result: T) {
+        if let Err(e) = self.result_sender.send(PluginOpCallResult {
+            call_id: id,
+            result: Err(result.into()),
+        }) {
+            eprintln!("{}", e.to_string());
         }
     }
 
-    pub fn call_receiver(&mut self) -> impl Fn() -> Result<PluginOpCall<P>, String> {
-        let receiver = self.call_receiver.take();
-        move || {
-            if receiver.is_none() {
-                return Err("call_receiver already used".to_string());
-            }
-            let res = receiver.as_ref().unwrap().recv();
-            if let Err(ref e) = res {
-                return Err(e.to_string());
-            }
-            Ok(res.unwrap())
+    pub fn receive(&self) -> Result<PluginOpCall<P>, String> {
+        let res = {
+            self.call_receiver.lock().unwrap().recv()
+        };
+        if let Err(ref e) = res {
+            return Err(e.to_string());
         }
+        Ok(res.unwrap())
     }
 }
 
@@ -112,7 +103,7 @@ impl<P: PluginData> PluginRuntime<P> where P::PluginCallResult: 'static + Plugin
         let event_loop = self.event_loop.take().unwrap();
         let handle = Handle {
             result_sender: result_sender.clone(),
-            call_receiver: Some(call_receiver),
+            call_receiver: Arc::new(Mutex::new(call_receiver)),
         };
         self.result_sender.replace(result_sender);
         self.subscribers.replace(Arc::new(Mutex::new(HashMap::new())));

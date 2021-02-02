@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 pub type PluginResult<T> = Result<T, PluginError>;
 
-pub trait PluginData: Clone {
+pub trait PluginData: Clone + Send {
     type PluginCall: Send;
     type PluginCallResult: PluginCallResult;
     fn name(&self) -> String;
