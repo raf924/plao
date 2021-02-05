@@ -39,9 +39,7 @@ pub struct PluginOpCallResult<P: PluginCallResult> {
 
 #[derive(TypedBuilder)]
 pub struct PluginRuntime<P: PluginData> where P::PluginCall: Send, P::PluginCallResult: PluginCallResult,  {
-    #[builder(setter(strip_option))]
-    event_loop: Option<Box<dyn Send + Fn(Handle<P>) -> Result<(), String>>>,
-    plugin_loader: Box<dyn Fn(P) -> P::PluginCall>,
+    plugin_loader: Box<dyn Send + Fn(P) -> P::PluginCall>,
 
     #[builder(default=None, setter(skip))]
     result_sender: Option<Sender<PluginOpCallResult<P::PluginCallResult>>>,
@@ -96,11 +94,10 @@ impl<P: PluginData> Handle<P> {
 }
 
 impl<P: PluginData> PluginRuntime<P> where P::PluginCallResult: 'static + PluginCallResult,  P::PluginCall: 'static + Send {
-    pub fn run(&mut self) -> (impl core::future::Future<Output=()>, impl core::future::Future<Output=()>) {
+    pub fn run(&mut self) -> (impl core::future::Future<Output=()>, Handle<P>) {
         let (call_sender, call_receiver) = channel();
         let (result_sender, result_receiver) = channel();
         self.call_sender = Some(call_sender);
-        let event_loop = self.event_loop.take().unwrap();
         let handle = Handle {
             result_sender: result_sender.clone(),
             call_receiver: Arc::new(Mutex::new(call_receiver)),
@@ -140,12 +137,12 @@ impl<P: PluginData> PluginRuntime<P> where P::PluginCallResult: 'static + Plugin
                     break;
                 }
             }
-        },
-        async move {
+        }, handle)
+        /*async move {
             if let Err(e) = (event_loop)(handle) {
                 eprintln!("{}", e);
             }
-        })
+        })*/
     }
 
     pub fn load_plugin(
@@ -173,16 +170,18 @@ impl<P: PluginData> PluginRuntime<P> where P::PluginCallResult: 'static + Plugin
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{build_dummy_runtime};
+    use crate::test_utils::{build_dummy_runtime, dummy_event_loop};
     use crate::tokio_utils::create_tokio_runtime;
 
     #[test]
     fn build_runtime() {
         let mut dummy_runtime = build_dummy_runtime();
-        let (fut1, fut2) = dummy_runtime.run();
+        let (fut1, handle) = dummy_runtime.run();
         let runtime = create_tokio_runtime();
         let handle1 = runtime.spawn(fut1);
-        let handle2 = runtime.spawn(fut2);
+        let handle2 = runtime.spawn(async move {
+            dummy_event_loop(handle)
+        });
         drop(dummy_runtime);
         let (_res1, _res2) = runtime.block_on(async move {
             tokio::join!(handle1, handle2)

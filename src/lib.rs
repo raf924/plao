@@ -15,6 +15,7 @@ use crate::runtime::{PluginOpCall, RuntimeResult, PluginOpCallId};
 use std::sync::{Mutex, Arc};
 use std::collections::HashMap;
 use uuid::Uuid;
+use std::fmt::Debug;
 
 pub type PluginResult<T> = Result<T, PluginError>;
 
@@ -26,7 +27,7 @@ pub trait PluginData: Clone + Send {
 
 pub trait PluginCallResult: Clone {
     type Ok: Send + Clone;
-    type Err: Send + Clone + ToString;
+    type Err: Send + Clone + ToString + Debug;
 }
 
 pub struct Plugin<P: PluginData> {
@@ -36,6 +37,10 @@ pub struct Plugin<P: PluginData> {
 }
 
 impl<P: PluginData> Plugin<P> {
+    pub fn name(&self) -> String {
+        self.plugin_data.name()
+    }
+
     pub fn execute(&self, plugin_call: P::PluginCall) -> PluginResult<Result<<P::PluginCallResult as PluginCallResult>::Ok, <P::PluginCallResult as PluginCallResult>::Err>> {
         let id = Uuid::new_v4();
         let (result_sender, result_receiver) = channel();
@@ -90,16 +95,18 @@ impl Error for PluginError {}
 #[cfg(test)]
 mod tests {
     use crate::tokio_utils::create_tokio_runtime;
-    use crate::test_utils::{build_dummy_runtime, DummySource};
+    use crate::test_utils::{build_dummy_runtime, DummySource, dummy_event_loop};
     use crate::loader::PluginLoader;
 
     #[test]
     fn execute() {
         let mut dummy_runtime = build_dummy_runtime();
-        let (fut1, fut2) = dummy_runtime.run();
+        let (fut1, handle) = dummy_runtime.run();
         let runtime = create_tokio_runtime();
         let handle1 = runtime.spawn(fut1);
-        let handle2 = runtime.spawn(fut2);
+        let handle2 = runtime.spawn(async move {
+            dummy_event_loop(handle);
+        });
         let mut dummy_loader = PluginLoader::new(DummySource{}, dummy_runtime);
         let plugins = dummy_loader.load_plugins(vec![]);
         let plugin = plugins.first().unwrap();

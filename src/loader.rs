@@ -46,16 +46,18 @@ impl<Source: 'static + PluginSource> PluginLoader<Source> {
 #[cfg(test)]
 mod tests {
     use crate::loader::PluginLoader;
-    use crate::test_utils::{DummySource, build_dummy_runtime};
+    use crate::test_utils::{DummySource, build_dummy_runtime, dummy_event_loop};
     use crate::tokio_utils::create_tokio_runtime;
 
     #[test]
     fn load_plugin() {
         let mut dummy_runtime = build_dummy_runtime();
-        let (fut1, fut2) = dummy_runtime.run();
+        let (fut1, handle) = dummy_runtime.run();
         let runtime = create_tokio_runtime();
         let handle1 = runtime.spawn(fut1);
-        let handle2 = runtime.spawn(fut2);
+        let handle2 = runtime.spawn(async move {
+            dummy_event_loop(handle)
+        });
         let mut dummy_loader = PluginLoader::new(DummySource{}, dummy_runtime);
         let plugins = dummy_loader.load_plugins(vec![]);
         assert_eq!(plugins.len(), 1);
@@ -69,10 +71,12 @@ mod tests {
     #[test]
     fn exclude_plugin() {
         let mut dummy_runtime = build_dummy_runtime();
-        let (fut1, fut2) = dummy_runtime.run();
+        let (fut1, handle) = dummy_runtime.run();
         let runtime = create_tokio_runtime();
         let handle1 = runtime.spawn(fut1);
-        let handle2 = runtime.spawn(fut2);
+        let handle2 = runtime.spawn(async move {
+            dummy_event_loop(handle)
+        });
         let mut dummy_loader = PluginLoader::new(DummySource{}, dummy_runtime);
         let plugins = dummy_loader.load_plugins(vec!["test".to_string()]);
         assert_eq!(plugins.len(), 0);
